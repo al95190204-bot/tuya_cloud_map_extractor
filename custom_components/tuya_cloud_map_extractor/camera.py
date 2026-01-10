@@ -205,7 +205,8 @@ class VacuumCamera(Camera):
 
     def turn_off(self):
         self._status = CameraStatus.OFF
-        self.async_schedule_update_ha_state(True)
+        # self.async_schedule_update_ha_state(True)   # raises error wrong thread
+        self.schedule_update_ha_state(True)
 
 
 class CameraStatus(Enum):
