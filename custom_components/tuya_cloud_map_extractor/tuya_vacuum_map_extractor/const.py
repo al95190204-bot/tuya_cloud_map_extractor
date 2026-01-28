@@ -284,3 +284,6 @@ class PixelValueNotDefined(Exception):
 
 class NotSupportedError(Exception):
     pass
+
+# ToDo: include this in config
+PATH_SENSOR_ID = "sensor.vacuum_path_store"

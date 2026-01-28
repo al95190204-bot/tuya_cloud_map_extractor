@@ -142,7 +142,8 @@ class VacuumCamera(Camera):
                 self._device_id,
                 self._colors,
                 self._settings,
-                self._urls
+                self._urls,
+                self.hass
             )
             _LOGGER.debug("Map data retrieved")
         except Exception as error:

@@ -14,10 +14,15 @@ from .v0 import decode_v0, to_array_v0
 from .v1 import decode_v1, to_array_v1, decode_path_v1, _format_path_point
 from .custom0 import decode_custom0, to_array_custom0, decode_path_custom0, map_to_image
 from .tuya import get_download_link
-from .const import NotSupportedError
+from .const import NotSupportedError, PATH_SENSOR_ID
 from .common import decode_header
 
 _LOGGER = logging.getLogger(__name__)
+
+# map data and header to continue camera working if error downloading new map
+old_mapDataArr = None
+old_header = None
+
 
 def download(url: str) -> requests.models.Response:
     """Downloads map and converts it to a dictionary and bytes object."""
@@ -42,9 +47,13 @@ def parse_map(response: requests.models.Response):
         
     return header, mapDataArr
 
-def parse_path(response: requests.models.Response, scale=2.0, header={}):
+def parse_path(response: requests.models.Response, scale=2.0, header={}, local=True):
     try:
-        data = response.json()
+        if local:
+            data = response
+        else:
+            data = response.json()
+        _LOGGER.debug(f"Path data before decoding: {data}")
         path_data = decode_path_custom0(data, header)
     except JSONDecodeError:
         data = response.content.hex()
@@ -69,7 +78,7 @@ def flip(headers: dict, image: Image.Image, settings: dict):
         image = image.transpose(Image.ROTATE_270)
     if flip_vertical:
         image = image.transpose(Image.FLIP_LEFT_RIGHT)
-    if flip_horizontal:
+    if not flip_horizontal:                             # temporary hack until options will work
         image = image.transpose(Image.FLIP_TOP_BOTTOM)
 
     return headers, image
@@ -104,9 +113,11 @@ def render_layout(raw_map: bytes, header: dict, colors: dict) -> Image.Image:
 
 
 def get_map(
-    server: str, client_id: str, secret_key: str, device_id: str, colors={}, settings={}, urls={}
-) -> Image:
+    server: str, client_id: str, secret_key: str, device_id: str, colors={}, settings={}, urls={},
+hass=None) -> Image:
     """Downloads and parses vacuum map from tuya cloud."""
+    global old_mapDataArr, old_header
+
     render_path = settings["path_enabled"]
     last = settings["last"]
     if urls != {}:
@@ -142,6 +153,24 @@ def get_map(
 
     try:
         header, mapDataArr = parse_map(response)
+        old_mapDataArr = mapDataArr.copy()
+        old_header = header
+    except Exception as e:
+        _LOGGER.warning(f"Error parsing map {e}")
+        if old_mapDataArr is not None:  # try to continue working with elder map data
+            mapDataArr = old_mapDataArr.copy()
+            header = old_header
+        else:
+            _LOGGER.error(
+                "Unsupported data type. Include the following data in a github issue to request the data format to be added: "
+                + str(response.status_code)
+                + str(base64.b64encode(response.content))
+                + str(base64.b64encode(bytes(str(link), "utf-8")))
+                + " Thank you!"
+            )
+            raise e
+
+    try:
         image = render_layout(raw_map=mapDataArr, header=header, colors=colors)
     except Exception as e:
         _LOGGER.error(
@@ -152,6 +181,7 @@ def get_map(
             + " Thank you!"
         )
         raise e
+
 
     if urls == {}:
         header["urls"] = {
@@ -174,21 +204,33 @@ def get_map(
         
         scale = int(1080/image.size[0])
         image = image.resize((image.size[0]*scale, image.size[1]*scale), resample=Image.BOX)
-        response = download(path_link)
-        if response.status_code != 200:
-            _LOGGER.warning("Got " + str(response.status_code) + " from server while downloading path.")
-            raise FileNotFoundError
+
+        if hass is not None:
+            state = hass.states.get(PATH_SENSOR_ID)
+            attributes = state.attributes if state is not None else {}
+        else:
+            attributes = {}
+        local = len(attributes) > 0
+        if local:
+            response = attributes
+        else:
+            response = download(path_link)
+
+            if response.status_code != 200:
+                _LOGGER.warning("Got " + str(response.status_code) + " from server while downloading path.")
+                raise FileNotFoundError
         
         _LOGGER.debug(
             "Response path: "
-            + str(response.status_code)
-            + str(base64.b64encode(response.content))
+            # + str(response.status_code)
+            + str(base64.b64encode(str(response).encode() if local else response.content))
         )
 
         try:
-            path = parse_path(response, scale=scale, header=header)
+            path = parse_path(response, scale=scale, header=header, local=local)
         except Exception as e:
-            _LOGGER.error("Failed to parse path: " + str(base64.b64encode(response.content)))
+            _LOGGER.error("Failed to parse path: " + str(base64.b64encode(
+                str(response).encode() if local else response.content)))
             raise e
         
         draw = ImageDraw.Draw(image, 'RGBA')
